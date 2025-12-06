@@ -1,0 +1,28 @@
+paths:
+  tokenization_transfer_out: ./salad/transfer
+  mono_finetuned_out: ./salad/finetuned_mono
+  mixed_finetuned_out: ./salad/finetuned_mixed
+
+  # directory to files created using the sample_dataset.py file
+  goldfish_datadir: ./salad/data
+  flores_dir: ./data/flores/
+
+languages:
+  - eng_Latn
+  - est_Latn
+  - tur_Latn
+  - swe_Latn
+  - nob_Latn
+  - dan_Latn
+
+# which model sizes to use for the source/target models
+models:
+  source_size: 100MB
+  target_size: 10MB
+
+trainargs:
+  device: cuda
+  steps: 750
+  batch_size: 8
+  learning_rate: 0.0001
+  weight_decay: 0.0001
