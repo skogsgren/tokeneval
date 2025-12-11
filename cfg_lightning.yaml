@@ -1,19 +1,20 @@
 paths:
-  tokenization_transfer_out: ./salad/transfer
-  mono_finetuned_out: ./salad/finetuned_mono
-  mixed_finetuned_out: ./salad/finetuned_mixed
+  tokenization_transfer_out: ./lightning/transfer
+  mono_finetuned_out: ./lightning/finetuned_mono
+  mixed_finetuned_out: ./lightning/finetuned_mixed
 
   # directory to files created using the sample_dataset.py file
-  goldfish_datadir: ./salad/data
+  goldfish_datadir: ./lightning/data
   flores_dir: ./data/flores/
 
+# English, Estonian, Haitian Creole, Hungarian, Java, Swahili, Turkish
 languages:
+  - dan_Latn
   - eng_Latn
   - est_Latn
-  - tur_Latn
+  - gla_Latn
   - swe_Latn
-  - nob_Latn
-  - dan_Latn
+  - tur_Latn
 
 # which model sizes to use for the source/target models
 models:
