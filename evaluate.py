@@ -2,7 +2,7 @@
 __author__ = "Gustaf Gren"
 __doc__ = """
     tokenization transfer evaluation helper functions and pipeline
-    logic. adapted from original goldfish scripts.
+    logic. adapted from original goldfish/multiblimp scripts.
 """
 import argparse
 import logging
@@ -10,12 +10,15 @@ import json
 from pathlib import Path
 
 import codecs
+from datasets import load_dataset
 import numpy as np
+from minicons import scorer
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 import torch.nn as nn
 from tqdm import tqdm
 import yaml
+import pandas as pd
 
 from pprint import pprint
 
@@ -50,7 +53,7 @@ def ppl(
 
     loss = nn.CrossEntropyLoss(ignore_index=pid, reduction="none")
     surprisals, norm_surprisals, uid_props = [], [], []
-    for line in tqdm(lines):
+    for line in lines:
         inputs = tokenizer([line], add_special_tokens=False)
         input_ids = inputs["input_ids"]
         attention_mask = inputs["attention_mask"]
@@ -129,7 +132,7 @@ def belebele(
     corr = []
     loss = nn.CrossEntropyLoss(ignore_index=pid, reduction="none")
 
-    for r in tqdm(dataset):
+    for r in dataset:
         prefix = r["flores_passage"].strip() + " " + r["question"].strip() + " "
         mc_texts = []
         for ans_i in range(4):
@@ -177,6 +180,42 @@ def token_compression(tokenizer_spec: str, dataset: str | Path) -> float:
     return total_bytes / total_tokens
 
 
+def multiblimp(model_spec: str, test_lang: str, device: str = "cuda") -> float:
+    # load model
+    model = AutoModelForCausalLM.from_pretrained(model_spec)
+    tokenizer = AutoTokenizer.from_pretrained(model_spec)
+    ilm_model = scorer.IncrementalLMScorer(model, device, tokenizer=tokenizer)
+
+    # load dataset
+    dataset_name = "jumelet/multiblimp"
+    dataset = load_dataset(dataset_name, test_lang)["train"].to_pandas()
+
+    # score model
+    def score_pair(sen, wrong_sen):
+        sen_len = len(ilm_model.tokenizer.tokenize(sen))
+        wrong_sen_len = len(ilm_model.tokenizer.tokenize(wrong_sen))
+        if (max_length is not None) and (
+            (sen_len >= max_length) or (wrong_sen_len >= max_length)
+        ):
+            return 0.0, 0.0
+        stimuli = [sen, wrong_sen]
+        return ilm_model.sequence_score(stimuli, reduction=lambda x: x)
+
+    dataset["sen_prob"] = pd.Series(dtype=object).astype(object)
+    dataset["wrong_prob"] = pd.Series(dtype=object).astype(object)
+    max_length = ilm_model.model.transformer.config.n_ctx
+    for idx, row in dataset.iterrows():
+        sen_prob, wrong_prob = score_pair(row.sen, row.wrong_sen)
+        sen_nll = -sen_prob.sum().item()
+        wrong_nll = -wrong_prob.sum().item()
+        dataset.at[idx, "sen_prob"] = sen_prob.tolist()
+        dataset.at[idx, "wrong_prob"] = wrong_prob.tolist()
+        dataset.loc[idx, "sen_nll"] = sen_nll
+        dataset.loc[idx, "wrong_nll"] = wrong_nll
+        dataset.loc[idx, "delta"] = wrong_nll - sen_nll
+    return float(np.mean(dataset["delta"] > 0))
+
+
 def main(transfered_model_dir: Path, config: dict) -> dict:
     models = [x for x in transfered_model_dir.iterdir() if x.is_dir()]
     flores_dir = Path(config["paths"]["flores_dir"])
@@ -211,6 +250,9 @@ def main(transfered_model_dir: Path, config: dict) -> dict:
         tgt_data = str(flores_dir / f"{tgt_lang}.devtest")
 
         # -- PERPLEXITY --
+        logging.info(
+            f"calculating perplexity of {model_spec} ({src_lang=}, {tgt_lang=}, {label=})"
+        )
         srcp, srcp_norm, src_uid_prop = ppl(
             data=src_data,
             model_spec=model_spec,
@@ -224,8 +266,18 @@ def main(transfered_model_dir: Path, config: dict) -> dict:
         norm_sum = srcp_norm + tgtp_norm
 
         # -- TOKEN COMPRESSION --
+        logging.info(
+            f"calculating token compression of {model_spec} ({src_lang=}, {tgt_lang=}, {label=})"
+        )
         src_bpt = token_compression(model_spec, src_data)
         tgt_bpt = token_compression(model_spec, tgt_data)
+
+        # -- MULTIBLIMP --
+        logging.info(
+            f"calculating multiblimp for {model_spec} ({src_lang=}, {tgt_lang=}, {label=})"
+        )
+        src_mbp = multiblimp(model_spec, src_lang[:3])
+        tgt_mbp = multiblimp(model_spec, tgt_lang[:3])
 
         export_metrics[src_lang][tgt_lang][label]["src_log_ppl"] = srcp
         export_metrics[src_lang][tgt_lang][label]["tgt_log_ppl"] = tgtp
@@ -237,12 +289,17 @@ def main(transfered_model_dir: Path, config: dict) -> dict:
         export_metrics[src_lang][tgt_lang][label]["tgt_uid_prop"] = tgt_uid_prop
         export_metrics[src_lang][tgt_lang][label]["src_uid_prop"] = src_uid_prop
 
-        export_metrics[src_lang][tgt_lang][label]["tgt_bpt"] = tgt_bpt
         export_metrics[src_lang][tgt_lang][label]["src_bpt"] = src_bpt
+        export_metrics[src_lang][tgt_lang][label]["tgt_bpt"] = tgt_bpt
+
+        export_metrics[src_lang][tgt_lang][label]["src_mbp"] = src_mbp
+        export_metrics[src_lang][tgt_lang][label]["tgt_mbp"] = tgt_mbp
+        export_metrics[src_lang][tgt_lang][label]["sum_mbp"] = src_mbp + tgt_mbp
 
         logging.info(f"finished evaluating {model_spec}")
         logging.info(f"\t{srcp_norm=:.2f} {srcp=:.2f}")
         logging.info(f"\t{tgtp_norm=:.2f} {tgtp=:.2f}")
+        logging.info(f"\t{src_mbp=:.2f} {tgt_mbp=:.2f}")
         logging.info(f"\t{src_uid_prop=:.2f} {tgt_uid_prop=:.2f}")
         logging.info(f"\t{src_bpt=:.2f} {tgt_bpt=:.2f}")
 
@@ -277,6 +334,8 @@ def main(transfered_model_dir: Path, config: dict) -> dict:
                 tgt_lang=tgt_lang,
                 label="100mb_src",
             )
+
+        """
         # --- 100MB TARGET BASELINE ---
         # NOTE: this is a bit confusing to read since k/v are switched but trust me bro
         # NOTE: this is never finetuned since that wouldn't make much sense
@@ -288,7 +347,9 @@ def main(transfered_model_dir: Path, config: dict) -> dict:
                 tgt_lang=src_lang,
                 label="100mb_tgt",
             )
+        """
 
+        """
         # --- 10MB SRC BASELINE ---
         if not export_metrics[tgt_lang][src_lang]["10mb_src"]:
             evaluate_model(
@@ -297,6 +358,7 @@ def main(transfered_model_dir: Path, config: dict) -> dict:
                 tgt_lang=src_lang,
                 label="10mb_src",
             )
+        """
 
         # --- 10MB TGT BASELINE ---
         if not export_metrics[src_lang][tgt_lang]["10mb_tgt"]:
