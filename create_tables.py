@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-__doc__ = "contains script to generate result tables. super fragile script."
-
 import argparse
 import json
 from pathlib import Path
@@ -27,6 +24,11 @@ FRIENDLY_ASCII_LABEL = {
     "no-finetuning": "No FT",
     "mono-finetuning": "Mono FT",
     "mixed-finetuning": "Mixed FT",
+}
+
+FRIENDLY_METRIC = {
+    "ppl": "Perplexity",
+    "mbp": "MultiBlimp",
 }
 
 
@@ -77,21 +79,42 @@ def order_bold_table(df, baselines, bold_type="table"):
         for col in df.columns:
             if col == "Method":
                 continue
-            numeric_values = df[col].apply(
-                lambda x: float(x.split()[0])
-                if isinstance(x, str) and x != "N/A"
-                else (np.inf if x == "N/A" else x)
-            )
-
-            min_val = numeric_values.min()
-            new_data[col] = [
-                f"\\textbf{{{v}}}"
-                if (
-                    isinstance(v, str) and v != "N/A" and float(v.split()[0]) == min_val
+            if col == "TGT NormPPL" or col == "SRC+TGT NormPPL":
+                numeric_values = df[col].apply(
+                    lambda x: float(x.split()[0])
+                    if isinstance(x, str) and x != "N/A"
+                    else (np.inf if x == "N/A" else x)
                 )
-                else v
-                for v in df[col]
-            ]
+
+                min_val = numeric_values.min()
+                new_data[col] = [
+                    f"\\textbf{{{v}}}"
+                    if (
+                        isinstance(v, str)
+                        and v != "N/A"
+                        and float(v.split()[0]) == min_val
+                    )
+                    else v
+                    for v in df[col]
+                ]
+            if col == "TGT MultiBlimp" or col == "SRC+TGT MultiBlimp":
+                numeric_values = df[col].apply(
+                    lambda x: float(x.split()[0])
+                    if isinstance(x, str) and x != "N/A"
+                    else (np.inf if x == "N/A" else x)
+                )
+
+                min_val = numeric_values.max()
+                new_data[col] = [
+                    f"\\textbf{{{v}}}"
+                    if (
+                        isinstance(v, str)
+                        and v != "N/A"
+                        and float(v.split()[0]) == min_val
+                    )
+                    else v
+                    for v in df[col]
+                ]
 
     elif bold_type == "table":
         numeric_map = np.full(df.shape, np.inf)
@@ -195,6 +218,9 @@ def build_tables(data, allowed_methods, uid_threshold=0.05, excluded=None):
     def tgt_ok(metrics):
         return metrics.get("tgt_uid_prop", 1) < uid_threshold
 
+    def src_ok(metrics):
+        return metrics.get("src_uid_prop", 1) < uid_threshold
+
     def pair_ok(metrics):
         return (
             metrics.get("tgt_uid_prop", 1) < uid_threshold
@@ -211,6 +237,7 @@ def build_tables(data, allowed_methods, uid_threshold=0.05, excluded=None):
                 continue
             collected, bpt_coll, log_ppl, sum_ppl = [], [], [], []
             src_ppl_list, tgt_ppl_list = [], []
+            sum_mbp, src_mbp, tgt_mbp = [], [], []
 
             for src_lang, tgt_block in src_block.items():
                 for tgt_lang, method_block in tgt_block.items():
@@ -219,46 +246,46 @@ def build_tables(data, allowed_methods, uid_threshold=0.05, excluded=None):
                         collected.append(metrics["tgt_norm_ppl"])
                         log_ppl.append(metrics["tgt_log_ppl"])
                         bpt_coll.append(metrics["tgt_bpt"])
+                        tgt_mbp.append(metrics["tgt_mbp"])
                     if metrics and pair_ok(metrics):
                         src_ppl_list.append(metrics["src_norm_ppl"])
                         tgt_ppl_list.append(metrics["tgt_norm_ppl"])
                         sum_ppl.append(metrics["sum_norm_ppl"])
+                        src_mbp.append(metrics["src_mbp"])
+                        sum_mbp.append(metrics["src_mbp"] + metrics["tgt_mbp"])
 
             method_label = pretty(method, label)
             method_label_ascii = pretty_ascii(method, label)
 
-            if src_ppl_list and tgt_ppl_list:
-                scatter_data[method_label_ascii] = {
-                    "src_ppl": np.median(src_ppl_list),
-                    "tgt_ppl": np.median(tgt_ppl_list),
-                }
+            scatter_data[method_label_ascii] = {
+                "src_ppl": np.median(src_ppl_list),
+                "tgt_ppl": np.median(tgt_ppl_list),
+                "src_mbp": np.median(src_mbp),
+                "tgt_mbp": np.median(tgt_mbp),
+            }
 
-            if not collected:
-                rows_t1.append(
-                    {
-                        "Method": method_label,
-                        "TGT NormPPL": "N/A",
-                        "Bytes/Token": "N/A",
-                    }
-                )
-            else:
-                arr = np.array(collected)
-                log_ppl = np.array(log_ppl)
-                sum_ppl = np.array(sum_ppl)
-                bpt = np.array(bpt_coll)
-                rows_t1.append(
-                    {
-                        "Method": method_label,
-                        "TGT NormPPL": f"{np.median(arr):.3f} (std={np.std(arr):.3f})",
-                        "Bytes/Token": f"{np.mean(bpt):.2f}",
-                    }
-                )
-                rows_t4.append(
-                    {
-                        "Method": method_label,
-                        "Normalized Sum PPL": f"{np.median(sum_ppl):.3f} (std={np.std(sum_ppl):.3f})",
-                    }
-                )
+            arr = np.array(collected)
+            log_ppl = np.array(log_ppl)
+            sum_ppl = np.array(sum_ppl)
+            bpt = np.array(bpt_coll)
+            tgt_mbp = np.array(tgt_mbp)
+            sum_mbp = np.array(sum_mbp)
+
+            rows_t1.append(
+                {
+                    "Method": method_label,
+                    "TGT NormPPL": f"{np.median(arr):.3f} (std={np.std(arr):.3f})",
+                    "TGT MultiBlimp": f"{np.median(tgt_mbp):.3f} (std={np.std(tgt_mbp):.3f})",
+                    "Bytes/Token": f"{np.mean(bpt):.2f}",
+                }
+            )
+            rows_t4.append(
+                {
+                    "Method": method_label,
+                    "SRC+TGT NormPPL": f"{np.median(sum_ppl):.3f} (std={np.std(sum_ppl):.3f})",
+                    "SRC+TGT MultiBlimp": f"{np.median(sum_mbp):.3f} (std={np.std(sum_mbp):.3f})",
+                }
+            )
     df_t1 = pd.DataFrame(rows_t1)
     df_t4 = pd.DataFrame(rows_t4)
 
@@ -343,15 +370,15 @@ def strip_latex(text):
     return text
 
 
-def create_bilingual_scatter(scatter_data, output_path="./plots/bilingual_scatter.pdf"):
+def create_scatter(scatter_data, metric="ppl", output_path="./plots/scatter.pdf"):
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(4, 3.5))
     texts = []
     for method_label, values in scatter_data.items():
-        ax.scatter(values["tgt_ppl"], values["src_ppl"], s=100, alpha=0.6)
+        ax.scatter(values[f"tgt_{metric}"], values[f"src_{metric}"], s=100, alpha=0.6)
         txt = ax.annotate(
             method_label,
-            (values["tgt_ppl"], values["src_ppl"]),
+            (values[f"tgt_{metric}"], values[f"src_{metric}"]),
             fontsize=7,
             alpha=0.8,
         )
@@ -359,13 +386,13 @@ def create_bilingual_scatter(scatter_data, output_path="./plots/bilingual_scatte
 
     adjust_text(texts, arrowprops=dict(arrowstyle="->", color="gray", lw=0.8))
 
-    ax.set_xlabel("Normalized Target Perplexity (median)")
-    ax.set_ylabel("Normalized Source Perplexity (median)")
-    ax.set_title("Source vs. Target Perplexity")
+    ax.set_xlabel(f"Normalized Target {FRIENDLY_METRIC[metric]} (median)")
+    ax.set_ylabel(f"Normalized Source {FRIENDLY_METRIC[metric]} (median)")
+    ax.set_title(f"Source vs. Target {FRIENDLY_METRIC[metric]}")
     ax.grid(True, alpha=0.3)
 
-    all_src = [v["src_ppl"] for v in scatter_data.values()]
-    all_tgt = [v["tgt_ppl"] for v in scatter_data.values()]
+    all_src = [v[f"src_{metric}"] for v in scatter_data.values()]
+    all_tgt = [v[f"tgt_{metric}"] for v in scatter_data.values()]
     max_val = max(max(all_src), max(all_tgt))
     min_val = min(min(all_src), min(all_tgt))
     # ax.set_xlim(min_val * 0.9, max_val * 1.05)
@@ -404,33 +431,29 @@ if __name__ == "__main__":
         },
     )
 
-    first_caption = f"""
-Aggregated normalized perplexity values for each evaluated
-language pair. Each aggregation uses the median of the valid language
-pairs, and is paired with standard deviation of valid language pairs. The
-number of valid language pairs for one method is denominated by n. A valid
-language pair is decided on whether the proportion of unknown tokens on the
-target testset is below {uid_threshold}.
+    first_caption = """
+Median and standard deviation of mean normalized target perplexity (smaller is better) and MultiBlimp (larger is better) scores across all language pairs (n=30), alongside average bytes per token for each method.
 """
     first_table = to_latex(
-        df=order_bold_table(tables[0], baselines),
+        df=order_bold_table(tables[0], baselines, "column"),
         label="aggregated_tgt_ppl",
         caption=first_caption,
-        columns="lll",
+        columns="llll",
         n_base=len(baselines),
     )
     print(first_table)
 
     second_caption = """
-Aggregated normalized sum perplexity (target + source) for each evaluated language pair. Each aggregation uses the median of the language pairs, and is paired with the standard deviation
+Median and standard deviation of mean normalized source + target perplexity (smaller is better) and MultiBlimp (larger is better) scores across all language pairs (n=30)
 """
     second_table = to_latex(
-        df=order_bold_table(tables[4], baselines),
+        df=order_bold_table(tables[4], baselines, "column"),
         label="aggregated_sum_ppl",
         caption=second_caption,
-        columns="ll",
+        columns="lll",
         n_base=len(baselines),
     )
     print(second_table)
 
-    create_bilingual_scatter(tables[3])
+    create_scatter(tables[3], "ppl", Path("./plots/bilingual_ppl.pdf"))
+    create_scatter(tables[3], "mbp", Path("./plots/bilingual_mbp.pdf"))
